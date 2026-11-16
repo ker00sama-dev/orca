@@ -17,6 +17,11 @@ import {
 import type { WorkerThreadRole } from './worker-thread-roles'
 import { readJournalReaderRetention } from '../native-chat/agent-session-journal/journal-sql-reader-retention'
 import { readSubscriberRetention } from '../native-chat/agent-session-wire/publication/subscribers/agent-session-subscriber-retention'
+import { readRetainedBytes, type RetainedBytesReading } from '../memory/retained-bytes-budget'
+import {
+  chatPathRetainedBytes,
+  chatRetainedBytesRefusals
+} from '../native-chat/retention/chat-path-retained-bytes'
 import { observeWorkerThreads } from './worker-thread-spawn'
 
 /**
@@ -169,14 +174,29 @@ function annotateCrashReport(
 type Retention = {
   reads: ReturnType<typeof readJournalReaderRetention>
   lanes: ReturnType<typeof readSubscriberRetention>
+  held: Record<string, RetainedBytesReading>
 }
 
 function readRetention(): Retention {
-  return { reads: readJournalReaderRetention(), lanes: readSubscriberRetention() }
+  return {
+    reads: readJournalReaderRetention(),
+    lanes: readSubscriberRetention(),
+    held: readRetainedBytes()
+  }
 }
 
-function retentionAnnotations({ reads, lanes }: Retention): [string, string][] {
+/** One line for every holder in the retained-bytes ledger, chat budget first. */
+function retainedBytesAnnotation(held: Record<string, RetainedBytesReading>): string {
+  const sources = Object.entries(held)
+    .map(([source, { bytes, items }]) => `${source}=${Math.round(bytes / MB)}MB/${items}`)
+    .join(' ')
+  const chat = Math.round(chatPathRetainedBytes.reading().bytes / MB)
+  return `chat=${chat}MB refused=${chatRetainedBytesRefusals()} ${sources}`
+}
+
+function retentionAnnotations({ reads, lanes, held }: Retention): [string, string][] {
   return [
+    ['orca-retained-bytes', retainedBytesAnnotation(held)],
     [
       'orca-reader-pool',
       `flight=${reads.inFlight} unconsumed=${reads.unconsumed} wait=${reads.waiting} ` +
@@ -191,8 +211,14 @@ function retentionAnnotations({ reads, lanes }: Retention): [string, string][] {
   ]
 }
 
-function retentionData({ reads, lanes }: Retention): CrashReportBreadcrumbData {
+function retentionData({ reads, lanes, held }: Retention): CrashReportBreadcrumbData {
+  const sources = Object.fromEntries(
+    Object.entries(held).map(([source, { bytes }]) => [`held_${source}_MB`, Math.round(bytes / MB)])
+  )
   return {
+    ...sources,
+    chatHeldMB: Math.round(chatPathRetainedBytes.reading().bytes / MB),
+    chatRefused: chatRetainedBytesRefusals(),
     readsInFlight: reads.inFlight,
     readsUnconsumed: reads.unconsumed,
     readsWaiting: reads.waiting,
