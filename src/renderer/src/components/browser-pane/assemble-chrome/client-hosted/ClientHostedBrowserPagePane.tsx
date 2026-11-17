@@ -367,7 +367,12 @@ export function ClientHostedBrowserPagePane(props: Props) {
           className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-background"
           style={devToolsPageFlex === null ? undefined : { flex: devToolsPageFlex }}
         >
-          <ClientHostedBrowserPageBox box={pageBox}>{markup.overlay}</ClientHostedBrowserPageBox>
+          <ClientHostedBrowserPageBox
+            scrollerRef={pageBox.scrollerRef}
+            contentRef={pageBox.contentRef}
+          >
+            {markup.overlay}
+          </ClientHostedBrowserPageBox>
           <BrowserPageFeedbackBadge ref={zoom.feedbackBadgeRef} />
           <BrowserFind
             browserPageId={browserTab.id}
