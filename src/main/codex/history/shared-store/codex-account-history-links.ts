@@ -14,6 +14,7 @@ import {
   LINKED_MANAGED_HOME_MARKER,
   MANAGED_HOME_MARKER
 } from '../../../codex-accounts/managed-homes/host-codex-managed-home-ownership'
+import { findHeldCodexLocks } from '../../../filesystem/held-lock-probe'
 import { writeSharedSqliteHome } from './codex-account-sqlite-home-config'
 import {
   CODEX_DATABASE_FILE,
@@ -59,6 +60,7 @@ const PRIVATE_DIRECTORIES = new Set([
 const HISTORY_DIRECTORIES = new Set(['sessions', 'archived_sessions'])
 // Linked before any history, so a home never writes shared rollouts under private locks.
 const WRITER_LOCKS = 'thread-writer-locks'
+const COORDINATION_LOCK = '.coordination.lock'
 // Present from the first unlinked folder until the databases moved aside, so a retry finishes.
 const UNSHARE_PENDING = '.orca-unshare-pending'
 
@@ -112,16 +114,20 @@ async function sharedDirectoryNames(storeHome: string, accountHome: string): Pro
   return [...names].filter(isSharedDirectoryName)
 }
 
-// Codex deletes a thread lock on release, so one left may guard a live writer; Codex itself
-// clears stale ones on its next start, after which a later launch shares the home.
+// A thread lock only guards a writer while some process holds it: Codex leaves the file behind
+// after a crash, and whenever releasing it finds coordination contended, so its mere presence
+// proves nothing. A home with no lock folder never had a Codex writer.
 async function hasThreadWriter(accountHome: string): Promise<boolean> {
   const locks = join(accountHome, WRITER_LOCKS)
-  if ((await lstatIfPresent(locks))?.isSymbolicLink()) {
+  const folder = await lstatIfPresent(locks)
+  if (!folder || folder.isSymbolicLink()) {
     return false
   }
-  return (await readDirectoryEntries(locks)).some(
-    (entry) => entry.name.endsWith('.lock') && entry.name !== '.coordination.lock'
-  )
+  const files = (await readDirectoryEntries(locks))
+    .filter((entry) => entry.name.endsWith('.lock') && entry.name !== COORDINATION_LOCK)
+    .map((entry) => join(locks, entry.name))
+  const held = await findHeldCodexLocks(join(locks, COORDINATION_LOCK), files)
+  return held === null || held.size > 0
 }
 
 async function isSameDirectory(left: string, right: string): Promise<boolean> {

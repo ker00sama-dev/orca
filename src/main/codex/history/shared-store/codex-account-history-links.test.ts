@@ -1,9 +1,11 @@
 import {
+  closeSync,
   existsSync,
   linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -13,7 +15,9 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createInterface } from 'node:readline'
 import { zstdCompressSync } from 'node:zlib'
+import { spawnProcess } from '@orca/process-host'
 import { afterEach, describe, expect, it } from 'vitest'
 import { checkCodexHistoryLeftBehind } from './codex-account-history-content-check'
 import { shareCodexAccountHistory, unshareCodexAccountHistory } from './codex-account-history-links'
@@ -21,6 +25,30 @@ import { shareCodexAccountHistory, unshareCodexAccountHistory } from './codex-ac
 const ROLLOUT = 'rollout-2026-11-14T10-00-00-0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.jsonl'
 const OTHER = 'rollout-2026-11-14T11-00-00-0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c.jsonl'
 const DAY = join('2026', '11', '14')
+
+// Holds a thread lock the way Codex does: flock on macOS and Linux, an open handle on Windows.
+async function holdThreadLock(lock: string): Promise<() => Promise<void>> {
+  if (process.platform === 'win32') {
+    const handle = openSync(lock, 'r+')
+    return async () => closeSync(handle)
+  }
+  const holder = spawnProcess({
+    program: '/usr/bin/perl',
+    args: [
+      '-MFcntl=:flock',
+      '-e',
+      'open(my $l, "+>>", $ARGV[0]) or die; flock($l, LOCK_EX) or die; $| = 1; print "locked\\n"; <STDIN>',
+      lock
+    ],
+    stdio: 'pipe'
+  })
+  const closed = new Promise((resolve) => holder.once('close', resolve))
+  await createInterface({ input: holder.stdout })[Symbol.asyncIterator]().next()
+  return async () => {
+    holder.stdin.end()
+    await closed
+  }
+}
 
 const roots: string[] = []
 function fixture(platform: NodeJS.Platform = 'linux') {
@@ -195,16 +223,23 @@ describe('shareCodexAccountHistory', () => {
     expect(lstatSync(join(f.account, 'sessions')).isSymbolicLink()).toBe(false)
   })
 
-  it('waits while a Codex in the home holds a thread lock', async () => {
+  it('waits while a Codex holds a thread lock, and shares once only a stale lock is left', async () => {
     const f = fixture()
+    const lock = join(f.account, 'thread-writer-locks', '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c.lock')
     mkdirSync(join(f.account, 'thread-writer-locks'))
-    writeFileSync(join(f.account, 'thread-writer-locks', '0199a1b2.lock'), '')
+    writeFileSync(lock, '')
     writeFileSync(join(f.account, 'sessions', DAY, OTHER), 'account only\n')
+    const release = await holdThreadLock(lock)
 
-    expect(await f.share()).toBe('busy')
-
+    try {
+      expect(await f.share()).toBe('busy')
+    } finally {
+      await release()
+    }
     expect(lstatSync(join(f.account, 'sessions')).isSymbolicLink()).toBe(false)
-    expect(existsSync(join(f.store, 'sessions', DAY, OTHER))).toBe(false)
+
+    expect(await f.share()).toBe('shared')
+    expect(readFileSync(join(f.store, 'sessions', DAY, OTHER), 'utf8')).toBe('account only\n')
   })
 })
 
